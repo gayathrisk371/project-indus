@@ -7,8 +7,8 @@ import pandas as pd
 import plotly.express as px
 import textwrap
 
-st.set_page_config(page_title="Business Analysis", layout="wide")
-st.title("Business Analysis")
+st.set_page_config(page_title="Project Indus", layout="wide")
+st.title("Project Indus")
 
 
 # =========================================================
