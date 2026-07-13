@@ -25,6 +25,7 @@ def indian_format(num):
         return f"{sign}₹{num/100000:.2f} Lakh"
     else:
         return f"{sign}₹{num:,.0f}"
+
 def usd_format(num):
     num = float(num)
     sign = "-" if num < 0 else ""
@@ -61,7 +62,7 @@ if file:
 
     dashboard = st.sidebar.radio(
         "Select Dashboard",
-        ["Cost Dashboard", "Revenue Dashboard","Margin Dashboard","Allocation Dashboard"]
+        ["Cost Dashboard", "Revenue Dashboard","Margin Dashboard","Employee Dashboard"]
     )
 
 # =========================================================
@@ -347,6 +348,240 @@ if file:
         fig3.update_layout(height=450)
 
         st.plotly_chart(fig3, use_container_width=True)
+
+        # =========================================================
+        # QUARTER-WISE VARIANCE ANALYSIS
+        # =========================================================
+        st.markdown("---")
+        st.header("Quarter-wise Variance Analysis")
+
+        # Assign quarter to every row for this customer
+        qdata = data.copy()
+        qdata = qdata.dropna(subset=["Month"])
+        qdata["Quarter"] = qdata["Month"].dt.to_period("Q").astype(str)
+
+        quarters_all = sorted(qdata["Quarter"].unique())
+
+        if len(quarters_all) >= 2:
+
+            # Quarter selectors in sidebar
+            q_idx1 = max(0, len(quarters_all) - 2)
+            q_idx2 = max(1, len(quarters_all) - 1)
+
+            q1_pick = st.sidebar.selectbox("Quarter 1", quarters_all, index=q_idx1)
+            q2_pick = st.sidebar.selectbox("Quarter 2", quarters_all, index=q_idx2)
+
+            # -------------------------------
+            # QUARTER DATA
+            # -------------------------------
+            dq1 = qdata[qdata["Quarter"] == q1_pick]
+            dq2 = qdata[qdata["Quarter"] == q2_pick]
+
+            gq1 = dq1.groupby(
+                ["Employee_ID", "Employee_Name"],
+                as_index=False
+            ).agg(
+                Cost_M1=("Cost", "sum"),
+                Alloc_M1=("Allocation", "sum")
+            )
+
+            gq2 = dq2.groupby(
+                ["Employee_ID", "Employee_Name"],
+                as_index=False
+            ).agg(
+                Cost_M2=("Cost", "sum"),
+                Alloc_M2=("Allocation", "sum")
+            )
+
+            qmerged = pd.merge(
+                gq1, gq2,
+                on=["Employee_ID", "Employee_Name"],
+                how="outer"
+            ).fillna(0)
+
+            qmerged["Variance"] = qmerged["Cost_M2"] - qmerged["Cost_M1"]
+
+            # -------------------------------
+            # QUARTER REASONS
+            # Use full df (all customers) with quarter col — same as monthly logic
+            # -------------------------------
+            df_q = df.dropna(subset=["Month"]).copy()
+            df_q["Quarter"] = df_q["Month"].dt.to_period("Q").astype(str)
+
+            def get_q_reason(row):
+
+                emp = row["Employee_ID"]
+
+                if row["Cost_M1"] > 0 and row["Cost_M2"] == 0:
+
+                    moved = df_q[
+                        (df_q["Employee_ID"] == emp) &
+                        (df_q["Quarter"] == q2_pick) &
+                        (df_q["Customer"] != customer)
+                    ]
+
+                    if not moved.empty:
+                        names = ", ".join(sorted(moved["Customer"].unique()))
+                        return f"Moved fully to {names}"
+
+                    return "Resigned"
+
+                elif row["Cost_M1"] == 0 and row["Cost_M2"] > 0:
+
+                    prev = df_q[
+                        (df_q["Employee_ID"] == emp) &
+                        (df_q["Quarter"] == q1_pick) &
+                        (df_q["Customer"] != customer)
+                    ]
+
+                    if not prev.empty:
+                        names = ", ".join(sorted(prev["Customer"].unique()))
+                        return f"Moved fully from {names}"
+
+                    return "New Joiner"
+
+                elif row["Alloc_M2"] < row["Alloc_M1"]:
+                    return "Decrease in %"
+
+                elif row["Alloc_M2"] > row["Alloc_M1"]:
+                    return "Increase in %"
+
+                elif row["Variance"] > 0:
+                    return "Cost Increased"
+
+                elif row["Variance"] < 0:
+                    return "Cost Reduced"
+
+                return "No Change"
+
+            qmerged["Reason"] = qmerged.apply(get_q_reason, axis=1)
+
+            qresult = qmerged.sort_values("Variance", ascending=False)
+
+            # -------------------------------
+            # QUARTER KPI
+            # -------------------------------
+            qtotal1 = qresult["Cost_M1"].sum()
+            qtotal2 = qresult["Cost_M2"].sum()
+            qvariance = qtotal2 - qtotal1
+
+            st.subheader(f"{customer}: {q1_pick} vs {q2_pick}")
+
+            qc1, qc2, qc3 = st.columns(3)
+            qc1.metric("Quarter 1 Cost", indian_format(qtotal1))
+            qc2.metric("Quarter 2 Cost", indian_format(qtotal2))
+            qc3.metric("Variance", indian_format(qvariance))
+
+            # -------------------------------
+            # QUARTER EMPLOYEE VARIANCE DRIVERS TABLE
+            # -------------------------------
+            st.subheader("Employee Variance Drivers (Quarter-wise)")
+            st.dataframe(qresult, use_container_width=True)
+
+            # -------------------------------
+            # QUARTER VARIANCE BY REASON CHART
+            # -------------------------------
+            st.subheader("Variance by Reason (Quarter-wise)")
+
+            qchart = (
+                qresult.groupby("Reason", as_index=False)["Variance"]
+                .sum()
+            )
+
+            qchart = qchart[qchart["Reason"] != "No Change"]
+            qchart["Abs"] = qchart["Variance"].abs()
+            qchart = qchart.sort_values("Abs", ascending=False)
+
+            qchart["Color"] = qchart["Variance"].apply(
+                lambda x: "Increase" if x >= 0 else "Reduction"
+            )
+
+            qchart["Label"] = qchart["Variance"].apply(indian_format)
+
+            fig_qr = px.bar(
+                qchart,
+                x="Variance",
+                y="Reason",
+                orientation="h",
+                color="Color",
+                text="Label",
+                color_discrete_map={
+                    "Increase": "green",
+                    "Reduction": "red"
+                }
+            )
+
+            fig_qr.update_traces(textposition="outside")
+            fig_qr.update_layout(height=600)
+
+            st.plotly_chart(fig_qr, use_container_width=True)
+
+            # -------------------------------
+            # QUARTER VARIANCE DRILL DOWN
+            # -------------------------------
+            st.subheader("Variance Drill Down (Quarter-wise)")
+
+            q_reason_pick = st.selectbox(
+                "Select Reason (Quarter)",
+                sorted(qresult["Reason"].unique())
+            )
+
+            qdrill = qresult[qresult["Reason"] == q_reason_pick]
+
+            st.dataframe(qdrill, use_container_width=True)
+
+            # -------------------------------
+            # QUARTER TOP EMPLOYEE MOVERS
+            # -------------------------------
+            st.subheader("Top Employee Movers (Quarter-wise)")
+
+            qmovers = qresult.copy()
+            qmovers["Abs"] = qmovers["Variance"].abs()
+            qmovers = qmovers.sort_values("Abs", ascending=False).head(10)
+            qmovers["Label"] = qmovers["Variance"].apply(indian_format)
+
+            fig_qm = px.bar(
+                qmovers,
+                x="Variance",
+                y="Employee_Name",
+                orientation="h",
+                text="Label",
+                color="Variance",
+                color_continuous_scale="RdYlGn",
+                hover_data=["Employee_ID", "Reason"]
+            )
+
+            fig_qm.update_traces(textposition="outside")
+            fig_qm.update_layout(height=600)
+
+            st.plotly_chart(fig_qm, use_container_width=True)
+
+            # -------------------------------
+            # QUARTERLY COST TREND
+            # -------------------------------
+            st.subheader("Quarterly Cost Trend")
+
+            q_trend = (
+                qdata.groupby("Quarter", as_index=False)["Cost"]
+                .sum()
+                .sort_values("Quarter")
+            )
+
+            q_trend["Label"] = q_trend["Cost"].apply(indian_format)
+
+            fig_qt = px.bar(
+                q_trend,
+                x="Quarter",
+                y="Cost",
+                text="Label",
+                color_discrete_sequence=["#4C78A8"]
+            )
+            fig_qt.update_traces(textposition="outside")
+            fig_qt.update_layout(height=450)
+            st.plotly_chart(fig_qt, use_container_width=True)
+
+        else:
+            st.info("Not enough quarterly data available for this customer. At least 2 quarters of data are needed.")
 
         # -------------------------------
         # EMPLOYEE SEARCH
@@ -663,23 +898,94 @@ if file:
             # REASON LOGIC
             # ---------------------------------------------------
             def get_reason(row):
-                if row["Cost_M1"] == 0 and row["Cost_M2"] > 0:
-                    return "New Joiner"
-                if row["Cost_M1"] > 0 and row["Cost_M2"] == 0:
-                    return "Resigned"
-                if row["Alloc_M2"] > row["Alloc_M1"]:
-                    return "Increase in Allocation %"
-                if row["Alloc_M2"] < row["Alloc_M1"]:
-                    return "Decrease in Allocation %"
-                if abs(row["Rs_M2"] - row["Rs_M1"]) < 1 and abs(row["Variance"]) > 1:
-                    return "Forex Fluctuation"
-                if row["Variance"] > 0:
-                    return "Salary Increase"
-                if row["Variance"] < 0:
-                    return "Salary Reduction"
-                return "Miscellaneous"
 
-            emp["Reason"] = emp.apply(get_reason, axis=1)
+                emp = row["Employee_ID"]
+
+                # ==========================
+                # FILTERS FOR PERIODS
+                # ==========================
+                if view_type == "Month":
+
+                    current_period = (
+                        (df["Month"].dt.date == m2.date())
+                    )
+
+                    previous_period = (
+                        (df["Month"].dt.date == m1.date())
+                    )
+
+                else:
+
+                    current_period = (
+                        (df["Quarter"] == period2)
+                    )
+
+                    previous_period = (
+                        (df["Quarter"] == period1)
+                    )
+
+                # ==========================
+                # MOVED OUT
+                # ==========================
+                if row["Cost_M1"] > 0 and row["Cost_M2"] == 0:
+
+                    moved = df[
+                        (df["Employee_ID"] == emp) &
+                        current_period &
+                        (df["Customer"] != customer)
+                    ]
+
+                    if not moved.empty:
+
+                        names = ", ".join(
+                            sorted(moved["Customer"].unique())
+                        )
+
+                        return f"Moved fully to {names}"
+
+                    return "Resigned"
+
+                # ==========================
+                # MOVED IN
+                # ==========================
+                elif row["Cost_M1"] == 0 and row["Cost_M2"] > 0:
+
+                    prev = df[
+                        (df["Employee_ID"] == emp) &
+                        previous_period &
+                        (df["Customer"] != customer)
+                    ]
+
+                    if not prev.empty:
+
+                        names = ", ".join(
+                            sorted(prev["Customer"].unique())
+                        )
+
+                        return f"Moved fully from {names}"
+
+                    return "New Joiner"
+
+                # ==========================
+                # ALLOCATION CHANGE
+                # ==========================
+                elif row["Alloc_M2"] < row["Alloc_M1"]:
+                    return "Decrease in %"
+
+                elif row["Alloc_M2"] > row["Alloc_M1"]:
+                    return "Increase in %"
+
+                # ==========================
+                # COST CHANGE
+                # ==========================
+                elif row["Variance"] > 0:
+                    return "Cost Increased"
+
+                elif row["Variance"] < 0:
+                    return "Cost Reduced"
+
+                return "No Change"
+  
 
             # ---------------------------------------------------
             # KPI DISPLAY
@@ -1075,104 +1381,404 @@ if file:
                 )
                 # =========================================================
 # ALLOCATION DASHBOARD (FULL FINAL)
+# ================================
+# =========================================================
+# EMPLOYEE DASHBOARD
+# =========================================================
+    if dashboard == "Employee Dashboard":
 
-# =========================
-# ALLOCATION DASHBOARD
-# =========================
-    if dashboard == "Allocation Dashboard":
+        df = pd.read_excel(xls, sheet_name="Employee Allocation")
+        df.columns = df.columns.str.strip()
 
-                st.header("Allocation Dashboard")
-                st.subheader("Employee Allocation Drilldown")
+        df = df[
+            [
+                "Month-2",
+                "Employee Id",
+                "Employee Name",
+                "Tagging",
+                "Final Allocation %",
+                "Total Cost in Rs"
+            ]
+        ]
 
-                # ---------- LOAD DATA ----------
-                try:
-                    alloc = pd.read_excel(xls, sheet_name="Employee Allocation")
-                except:
-                    st.error("Sheet 'Employee Allocation' not found")
-                    st.stop()
+        df.columns = [
+            "Month",
+            "Employee_ID",
+            "Employee_Name",
+            "Customer",
+            "Allocation",
+            "Cost"
+        ]
 
-                # ---------- COLUMN CLEANUP ----------
-                alloc.columns = alloc.columns.str.strip()
+        df["Month"] = pd.to_datetime(df["Month"], dayfirst=True, errors="coerce")
+        df["Cost"] = clean_num(df["Cost"])
+        df["Allocation"] = clean_num(
+            df["Allocation"].astype(str).str.replace("%", "", regex=False)
+        )
+        df["Allocation"] = df["Allocation"].apply(
+            lambda x: x * 100 if x <= 1 else x
+        )
+        df["Employee_ID"] = df["Employee_ID"].astype(str).str.strip()
+        df["Customer"] = df["Customer"].astype(str).str.strip()
 
-                required_cols = ["Month", "Employee Name", "Tagging", "Final Allocation %"]
+        # Fix FY window: Apr 2025 - Mar 2026
+        fy_start = pd.Timestamp("2025-04-01")
+        fy_end   = pd.Timestamp("2026-03-31")
+        df = df[(df["Month"] >= fy_start) & (df["Month"] <= fy_end)]
 
-                for col in required_cols:
-                    if col not in alloc.columns:
-                        st.error(f"Missing column: {col}")
-                        st.stop()
+        # Month order label
+        month_order = pd.date_range("2025-04-01", periods=12, freq="MS")
+        month_labels = {m: m.strftime("%b %Y") for m in month_order}
+        df["Month_Label"] = df["Month"].apply(
+            lambda x: x.strftime("%b %Y") if pd.notna(x) else None
+        )
+        ordered_labels = [m.strftime("%b %Y") for m in month_order]
 
-                # ---------- CLEAN DATA ----------
-                alloc["Month"] = alloc["Month"].astype(str)
+        # -------------------------------
+        # EMPLOYEE SEARCH
+        # -------------------------------
+        emp_master = (
+            df[["Employee_ID", "Employee_Name"]]
+            .drop_duplicates()
+            .sort_values("Employee_Name")
+        )
+        emp_master["Display"] = emp_master["Employee_ID"] + " - " + emp_master["Employee_Name"]
 
-                alloc["Final Allocation %"] = (
-                    alloc["Final Allocation %"]
-                    .astype(str)
-                    .str.replace("%", "", regex=False)
-                    .str.strip()
+        st.sidebar.markdown("### Employee Search")
+        emp_pick = st.sidebar.selectbox(
+            "Select Employee",
+            [""] + emp_master["Display"].tolist()
+        )
+
+        if not emp_pick:
+            st.info("Please select an employee from the sidebar to view their dashboard.")
+            st.stop()
+
+        emp_id   = emp_pick.split(" - ")[0]
+        emp_name = emp_pick.split(" - ", 1)[1]
+
+        edf = df[df["Employee_ID"] == emp_id].copy()
+
+        # -------------------------------
+        # SUMMARY CARD
+        # -------------------------------
+        st.markdown(f"## 👤 {emp_name} ({emp_id})")
+        st.markdown("**FY 2025-26 · Apr 2025 – Mar 2026**")
+
+        latest_month = edf["Month"].max()
+        latest_data  = edf[edf["Month"] == latest_month]
+
+        total_cost_fy     = edf["Cost"].sum()
+        avg_alloc_fy      = edf.groupby("Month")["Allocation"].sum().mean()
+        num_customers     = edf["Customer"].nunique()
+        latest_cost       = latest_data["Cost"].sum()
+        latest_alloc      = latest_data["Allocation"].sum()
+        latest_customers  = latest_data["Customer"].nunique()
+
+        sc1, sc2, sc3, sc4 = st.columns(4)
+        sc1.metric("FY Total Cost",        indian_format(total_cost_fy))
+        sc2.metric("Avg Monthly Allocation", f"{avg_alloc_fy:.1f}%")
+        sc3.metric("Customers Worked On",  str(num_customers))
+        sc4.metric(
+            f"Latest Month ({latest_month.strftime('%b %Y')}) Cost",
+            indian_format(latest_cost),
+            delta=f"Alloc: {latest_alloc:.0f}%"
+        )
+
+        st.markdown("---")
+
+        # -------------------------------
+        # SECTION 1 — ALLOCATION STACKED BAR
+        # -------------------------------
+        st.subheader("Allocation Across Customers (Month-wise)")
+
+        alloc_pivot = (
+            edf.groupby(["Month_Label", "Customer"], as_index=False)["Allocation"]
+            .sum()
+        )
+
+        # Force all 12 months to exist for every customer so order is always correct
+        all_customers = alloc_pivot["Customer"].unique()
+        full_index = pd.MultiIndex.from_product(
+            [ordered_labels, all_customers],
+            names=["Month_Label", "Customer"]
+        )
+        alloc_pivot = (
+            alloc_pivot
+            .set_index(["Month_Label", "Customer"])
+            .reindex(full_index, fill_value=0)
+            .reset_index()
+        )
+
+        alloc_pivot["Month_Label"] = pd.Categorical(
+            alloc_pivot["Month_Label"], categories=ordered_labels, ordered=True
+        )
+        alloc_pivot = alloc_pivot.sort_values("Month_Label")
+
+        fig_alloc = px.bar(
+            alloc_pivot,
+            x="Month_Label",
+            y="Allocation",
+            color="Customer",
+            text="Allocation",
+            barmode="stack",
+            height=450,
+            category_orders={"Month_Label": ordered_labels}
+        )
+
+        # Enforce month order on the x-axis explicitly
+        fig_alloc = px.bar(
+            alloc_pivot,
+            x="Month_Label",
+            y="Allocation",
+            color="Customer",
+            text="Allocation",
+            barmode="stack",
+            height=450,
+            category_orders={"Month_Label": ordered_labels}   # ← this line fixes the order
+        )
+
+        # Enforce month order on the x-axis explicitly
+        fig_alloc = px.bar(
+            alloc_pivot,
+            x="Month_Label",
+            y="Allocation",
+            color="Customer",
+            text="Allocation",
+            barmode="stack",
+            height=450,
+            category_orders={"Month_Label": ordered_labels}   # ← this line fixes the order
+        )
+
+        # Enforce month order on the x-axis explicitly
+        fig_alloc = px.bar(
+            alloc_pivot,
+            x="Month_Label",
+            y="Allocation",
+            color="Customer",
+            text="Allocation",
+            barmode="stack",
+            height=450,
+            category_orders={"Month_Label": ordered_labels}   # ← this line fixes the order
+        )
+
+        # Enforce month order on the x-axis explicitly
+        fig_alloc = px.bar(
+            alloc_pivot,
+            x="Month_Label",
+            y="Allocation",
+            color="Customer",
+            text="Allocation",
+            barmode="stack",
+            height=450,
+            category_orders={"Month_Label": ordered_labels}   # ← this line fixes the order
+        )
+
+        fig_alloc = px.bar(
+            alloc_pivot,
+            x="Month_Label",
+            y="Allocation",
+            color="Customer",
+            text="Allocation",
+            barmode="stack",
+            height=450
+        )
+        fig_alloc.update_traces(texttemplate="%{text:.0f}%", textposition="inside")
+        fig_alloc.update_layout(
+            xaxis_title="Month",
+            yaxis_title="Allocation %",
+            legend_title="Customer",
+            yaxis=dict(range=[0, 120])
+        )
+        st.plotly_chart(fig_alloc, use_container_width=True)
+
+        # -------------------------------
+        # ALLOCATION HEATMAP TABLE
+        # -------------------------------
+        st.subheader("Allocation Heatmap (Customer × Month)")
+
+        heat_pivot = edf.pivot_table(
+            index="Customer",
+            columns="Month_Label",
+            values="Allocation",
+            aggfunc="sum"
+        ).reindex(columns=ordered_labels).fillna(0)
+
+        # Style: color intensity by value
+        styled = heat_pivot.style.background_gradient(
+            cmap="YlOrRd", axis=None
+        ).format("{:.0f}%")
+
+        st.dataframe(styled, use_container_width=True)
+
+        st.markdown("---")
+
+        # -------------------------------
+        # SECTION 2 — COST TREND
+        # -------------------------------
+        st.subheader("Monthly Cost & Allocation Trend")
+
+        cost_trend = (
+            edf.groupby("Month_Label", as_index=False)
+            .agg(Cost=("Cost", "sum"), Allocation=("Allocation", "sum"))
+        )
+        cost_trend["Month_Label"] = pd.Categorical(
+            cost_trend["Month_Label"], categories=ordered_labels, ordered=True
+        )
+        cost_trend = cost_trend.sort_values("Month_Label")
+
+        fig_cost = px.line(
+            cost_trend,
+            x="Month_Label",
+            y="Cost",
+            markers=True,
+            height=400,
+            labels={"Month_Label": "Month", "Cost": "Cost (₹)"}
+        )
+
+        # Overlay allocation as a secondary line on secondary y-axis
+        fig_cost.add_scatter(
+            x=cost_trend["Month_Label"],
+            y=cost_trend["Allocation"],
+            mode="lines+markers",
+            name="Allocation %",
+            yaxis="y2",
+            line=dict(dash="dash", color="orange")
+        )
+
+        fig_cost.update_layout(
+            yaxis=dict(title="Cost (₹)"),
+            yaxis2=dict(
+                title="Allocation %",
+                overlaying="y",
+                side="right",
+                showgrid=False,
+                range=[0, 150]
+            ),
+            legend=dict(x=0.01, y=0.99)
+        )
+
+        st.plotly_chart(fig_cost, use_container_width=True)
+
+        st.markdown("---")
+
+        # -------------------------------
+        # SECTION 3 — DONUT: USER-PICKED MONTH
+        # -------------------------------
+        st.subheader("Customer Split — Snapshot Month")
+
+        available_months = [m for m in ordered_labels if m in edf["Month_Label"].values]
+        snap_month = st.selectbox("Select month for snapshot", available_months,
+                                  index=len(available_months)-1)
+
+        snap_data = edf[edf["Month_Label"] == snap_month]
+
+        if snap_data.empty:
+            st.info(f"No data for {snap_month}.")
+        else:
+            snap_grp = snap_data.groupby("Customer", as_index=False).agg(
+                Allocation=("Allocation", "sum"),
+                Cost=("Cost", "sum")
+            )
+
+            col_donut, col_snap = st.columns(2)
+
+            with col_donut:
+                fig_donut = px.pie(
+                    snap_grp,
+                    names="Customer",
+                    values="Allocation",
+                    hole=0.45,
+                    title=f"Allocation % — {snap_month}"
                 )
+                fig_donut.update_traces(textinfo="label+percent")
+                st.plotly_chart(fig_donut, use_container_width=True)
 
-                alloc["Final Allocation %"] = pd.to_numeric(alloc["Final Allocation %"], errors="coerce").fillna(0)
-
-                # ---------- EMPLOYEE SELECT ----------
-                emp_list = sorted(alloc["Employee Name"].dropna().unique())
-
-                selected_emp = st.selectbox("Select Employee", emp_list)
-
-                emp_df = alloc[alloc["Employee Name"] == selected_emp].copy()
-
-                if emp_df.empty:
-                    st.warning("No data for selected employee")
-                    st.stop()
-
-                # ---------- GROUP LOGIC ----------
-                def simplify(group):
-                    big = group[group["Final Allocation %"] >= 50]
-
-                    if len(big) == 0:
-                        return pd.Series({
-                            "Customer": "Multiple",
-                            "Allocation": group["Final Allocation %"].sum()
-                        })
-
-                    top = big.sort_values("Final Allocation %", ascending=False).iloc[0]
-
-                    return pd.Series({
-                        "Customer": top["Tagging"],
-                        "Allocation": top["Final Allocation %"]
-                    })
-
-                plot_df = emp_df.groupby("Month").apply(simplify).reset_index()
-
-                # ---------- SORT MONTHS ----------
-                def sort_month(m):
-                    try:
-                        return pd.to_datetime(m, format="%b%y")
-                    except:
-                        return pd.to_datetime(m, errors="coerce")
-
-                plot_df["Month_sort"] = plot_df["Month"].apply(sort_month)
-                plot_df = plot_df.sort_values("Month_sort")
-
-                # ---------- CHART ----------
-                fig = px.bar(
-                    plot_df,
-                    x="Month",
-                    y="Allocation",
+            with col_snap:
+                fig_cost_snap = px.bar(
+                    snap_grp,
+                    x="Customer",
+                    y="Cost",
+                    text=snap_grp["Cost"].apply(indian_format),
                     color="Customer",
-                    text="Allocation",
-                    title=f"{selected_emp} Allocation Trend"
+                    title=f"Cost by Customer — {snap_month}"
                 )
+                fig_cost_snap.update_traces(textposition="outside")
+                fig_cost_snap.update_layout(showlegend=False, height=400)
+                st.plotly_chart(fig_cost_snap, use_container_width=True)
 
-                fig.update_traces(
-                    texttemplate="%{text:.0f}%",
-                    textposition="inside"
-                )
+        st.markdown("---")
 
-                fig.update_layout(
-                    yaxis_title="Allocation %",
-                    xaxis_title="Month",
-                    uniformtext_minsize=8,
-                    uniformtext_mode="hide"
-                )
+        # -------------------------------
+        # SECTION 4 — MONTH-ON-MONTH ALLOCATION CHANGE
+        # -------------------------------
+        st.subheader("Month-on-Month Allocation Change")
 
-                st.plotly_chart(fig, use_container_width=True)
+        mom_months = [m for m in ordered_labels if m in edf["Month_Label"].values]
+
+        mc1, mc2 = st.columns(2)
+        mom_m1 = mc1.selectbox("From Month", mom_months, index=max(0, len(mom_months)-2))
+        mom_m2 = mc2.selectbox("To Month",   mom_months, index=max(1, len(mom_months)-1))
+
+        mom_df1 = edf[edf["Month_Label"] == mom_m1].groupby("Customer", as_index=False).agg(
+            Alloc_M1=("Allocation", "sum"), Cost_M1=("Cost", "sum")
+        )
+        mom_df2 = edf[edf["Month_Label"] == mom_m2].groupby("Customer", as_index=False).agg(
+            Alloc_M2=("Allocation", "sum"), Cost_M2=("Cost", "sum")
+        )
+
+        mom_merged = pd.merge(mom_df1, mom_df2, on="Customer", how="outer").fillna(0)
+        mom_merged["Alloc Change"]  = mom_merged["Alloc_M2"] - mom_merged["Alloc_M1"]
+        mom_merged["Cost Variance"] = mom_merged["Cost_M2"]  - mom_merged["Cost_M1"]
+
+        def mom_reason(row):
+            if row["Alloc_M1"] > 0 and row["Alloc_M2"] == 0:
+                return "Removed from project"
+            elif row["Alloc_M1"] == 0 and row["Alloc_M2"] > 0:
+                return "Added to project"
+            elif row["Alloc Change"] < 0:
+                return "Allocation decreased"
+            elif row["Alloc Change"] > 0:
+                return "Allocation increased"
+            return "No change"
+
+        mom_merged["Reason"] = mom_merged.apply(mom_reason, axis=1)
+
+        # Format for display
+        mom_display = mom_merged.copy()
+        mom_display["Alloc_M1"]      = mom_display["Alloc_M1"].apply(lambda x: f"{x:.0f}%")
+        mom_display["Alloc_M2"]      = mom_display["Alloc_M2"].apply(lambda x: f"{x:.0f}%")
+        mom_display["Alloc Change"]  = mom_display["Alloc Change"].apply(lambda x: f"{x:+.0f}%")
+        mom_display["Cost_M1"]       = mom_display["Cost_M1"].apply(indian_format)
+        mom_display["Cost_M2"]       = mom_display["Cost_M2"].apply(indian_format)
+        mom_display["Cost Variance"] = mom_display["Cost Variance"].apply(indian_format)
+        mom_display = mom_display.rename(columns={
+            "Alloc_M1": f"Alloc {mom_m1}",
+            "Alloc_M2": f"Alloc {mom_m2}",
+            "Cost_M1":  f"Cost {mom_m1}",
+            "Cost_M2":  f"Cost {mom_m2}",
+        })
+
+        st.dataframe(mom_display, use_container_width=True)
+
+        # Alloc change bar chart
+        fig_mom = px.bar(
+            mom_merged[mom_merged["Reason"] != "No change"],
+            x="Customer",
+            y="Alloc Change",
+            color="Reason",
+            text=mom_merged[mom_merged["Reason"] != "No change"]["Alloc Change"].apply(
+                lambda x: f"{x:+.0f}%"
+            ),
+            color_discrete_map={
+                "Allocation increased":  "green",
+                "Allocation decreased":  "red",
+                "Added to project":      "blue",
+                "Removed from project":  "orange"
+            },
+            height=400,
+            title=f"Allocation Change: {mom_m1} → {mom_m2}"
+        )
+        fig_mom.update_traces(textposition="outside")
+        fig_mom.update_layout(yaxis_title="Allocation Change %")
+        st.plotly_chart(fig_mom, use_container_width=True)
